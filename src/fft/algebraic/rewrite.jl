@@ -6,6 +6,7 @@ const DEFAULT_REWRITE_RULES = Vector{Function}[
     fft_rewrite_change_sdf_depth,
     fft_rewrite_merge_reorders,
     fft_rewrite_push_reorders_right,
+    fft_rewrite_push_reorders_right_past_sdf,
     fft_rewrite_push_scales_right,
   ], Function[
     fft_rewrite_delete_initial_reorder,
@@ -26,7 +27,6 @@ function fft_rewrite(plan::FFTPlan, rules = DEFAULT_REWRITE_RULES; exclude=[], t
   for rule_batch in rules
     if !isempty(exclude)
       rule_batch = setdiff(rule_batch, exclude)
-      @info "" rule_batch
       if isempty(rule_batch)
         continue
       end

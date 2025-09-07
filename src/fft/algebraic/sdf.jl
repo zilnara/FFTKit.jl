@@ -378,7 +378,7 @@ end
 fft_rewrite_reorder_sdf(r::Reorder, s::SDF) = fft_rewrite_reorder_sdf(r, s, Reorder(Permutation(1)))
 fft_rewrite_reorder_sdf(s::SDF, r::Reorder) = fft_rewrite_reorder_sdf(Reorder(Permutation(1)), s, r)
 
-function fft_rewrite_push_reorders_right(r::Reorder, s::SDF)
+function fft_rewrite_push_reorders_right_past_sdf(r::Reorder, s::SDF)
   # reorders can only move past a SDF stage if they don't change which subset of terms feed into each butterfly.
   # the way in which they are grouped might change, however (i.e., the depth of the SDF stage, and potentially
   # the permutation of each group (independently). Permutations of a group of inputs become a combination of

@@ -102,7 +102,159 @@ end
 Base.:(*)(r::Reorder, x::AbstractVector) = mul!(similar(x), r, x)
 Base.:(*)(r1::Reorder, r2::Reorder) = Reorder(permute_cyclic(r1.perm, r2.perm))
 Base.one(::Type{Reorder}) = Reorder(Permutation(1))
-Base.inv(r::Reorder) = r
+Base.inv(r::Reorder) = invperm(r)
+Base.invperm(r::Reorder) = Reorder(inv(r.perm))
+
+# WIP: ways of modeling MDC commutator stages
+# this one is very raw. Using the standard structure as shown in e.g. "A Survey on Pipelined FFT Hardware Architectures", models a single radix-2 reordering stage with potentially-different delay lengths (d1 is the top-right, d2 is the bottom-left), with explicit mux timing (mux1 is top mux, mux2 is bottom mux) and '0' is top path in a mux, '1' is bottom path in a mux.
+#
+# I probably won't do much with this any time soon, it's mostly a novelty for me. For my needs, I'm more interested in structures that can support natural input or output orders (MDF, mainly)
+function mdc_permutation(d1::Int, d2::Int, mux1::AbstractVector{Bool}, mux2::AbstractVector{Bool} = .! mux1; compact::Bool=true)
+  ram1 = Array{Union{Missing, Int}}(missing, d1); ram1_addr = 0
+  ram2 = Array{Union{Missing, Int}}(missing, d2); ram2_addr = 0
+  n = minimum(length, [mux1, mux2])
+  output = Union{Missing,Int}[]
+  for i in 0:n-1
+    stage_in1   = 2i;                                     stage_in2   = 2i+1
+    ram1_out    = ram1[1+ram1_addr];                      ram2_out    = ram2[1+ram2_addr]
+    mux1_out    = mux1[1+i] == 0 ? stage_in1 : ram2_out;  mux2_out    = mux2[1+i] == 0 ? stage_in1 : ram2_out
+    ram1_in     = mux1_out;                               ram2_in     = stage_in2
+    stage_out1  = ram1_out;                               stage_out2  = mux2_out
+
+    ram1[1+ram1_addr] = ram1_in;                          ram2[1+ram2_addr] = ram2_in
+    ram1_addr   = mod(ram1_addr+1, d1);                   ram2_addr   = mod(ram2_addr+1, d2)
+
+    append!(output, [stage_out1, stage_out2])
+  end
+
+  if compact
+    output = collect(skipmissing(output))
+  end
+  output
+end
+
+# experiment: is there a natural 3-path generalization? (and from there, N path)
+function mdc_r3_permutation(d::Int, mux1::AbstractVector{Int}, mux2::AbstractVector{Int}, mux3::AbstractVector{Int}; repeat::Int=1, compact::Bool=true)
+  # TODO: is there a better generalization, perhaps using only length-d delays? or tapped length-2d delays?
+  # I feel like the latter would work and generalize - in fact, i think it ends up just being a pretty natural reimagining of a generic SDF structure, with muxes in place of butterflies and butterflies applied in parallel
+  ram = [
+    Array{Union{Missing, Int}}(missing, 2d),
+    Array{Union{Missing, Int}}(missing,  d),
+    Array{Union{Missing, Int}}(missing,  d),
+    Array{Union{Missing, Int}}(missing, 2d),
+  ]
+  addr = zeros(Int, length(ram))
+
+  mux1 = mod.(mux1, 3)
+  mux2 = mod.(mux2, 3)
+  mux3 = mod.(mux3, 3)
+  if repeat != 1
+    mux1 = Base.repeat(mux1, outer=repeat)
+    mux2 = Base.repeat(mux2, outer=repeat)
+    mux3 = Base.repeat(mux3, outer=repeat)
+  end
+
+  n = minimum(length, [mux1, mux2, mux3])
+  output = Union{Missing, Int}[]
+  for i in 0:n-1
+    stage_in = 3i .+ (0:2)
+
+    ram_out = [ram[j][1+addr[j]] for j in 1:length(ram)]
+    mux_out = [stage_in[1], ram_out[3], ram_out[4]][1 .+ [mux1[1+i], mux2[1+i], mux3[1+i]]]
+    ram_in = [mux_out[1], mux_out[2], stage_in[2], stage_in[3]]
+    stage_out = [ram_out[1], ram_out[2], mux_out[3]]
+
+    for j in 1:length(ram)
+      ram[j][1+addr[j]] = ram_in[j]
+      addr[j] = mod(addr[j] + 1, length(ram[j]))
+    end
+
+    append!(output, stage_out)
+  end
+
+  if compact
+    output = collect(skipmissing(output))
+  end
+
+  output
+end
+
+# In general, these generate the same permutation:
+#     Permutation(1 .+ mdc_permutation_general(radix, depth))
+#     permute_mixed_digits([radix, depth, radix], [3,2,1])
+# 
+# Another way to look at it: the MDC shuffle stage swaps two digits of the sample address.
+# It always swaps the lowest with another, and which other one you want to swap determines the depth.
+# The depth is the product of the radixes of the digits between the ones being swapped.
+#
+# The overall length of the permutation is depth*radix^2.
+# Assuming a parallel implementation with `radix` lanes:
+#   The total RAM used is `depth*radix*(radix-1)`
+#   The total latency is `depth*(radix-1)`
+#   A hardware implementation would use a N:N mux, where N = radix
+function mdc_permutation_general(radix::Int, depth::Int, mux::AbstractVector{Int}=repeat(0:radix-1, inner=depth, outer=2); repeat::Int=1, compact::Bool=true, limit::Int=depth*radix^2)
+  ram_in  = [Array{Union{Missing, Int}}(missing, depth*i) for i in 0:radix-1]
+  ram_out = [Array{Union{Missing, Int}}(missing, depth*i) for i in radix-1:-1:1]
+  addr_in  = zeros(Int, length(ram_in))
+  addr_out = zeros(Int, length(ram_out))
+
+  if repeat != 1
+    mux = Base.repeat(mux, outer=repeat)
+  end
+
+  n = length(mux)
+  output = Union{Missing, Int}[]
+  for i in 0:n-1
+    stage_in = radix*i .+ (0:radix-1)
+    mux_in = [stage_in[1], [ram_in[j][1+addr_in[j]] for j in 2:radix]...]
+
+    mux_sel = @. 1 + mod(mux[i+1] + (radix:-1:1), radix)
+    mux_out = mux_in[mux_sel]
+
+    stage_out = [[ram_out[j][1+addr_out[j]] for j in 1:radix-1]..., mux_out[radix]]
+
+    for j in 2:radix
+      ram_in[j][1+addr_in[j]] = stage_in[j]
+      addr_in[j] = mod(addr_in[j] + 1, length(ram_in[j]))
+    end
+    for j in 1:radix-1
+      ram_out[j][1+addr_out[j]] = mux_out[j]
+      addr_out[j] = mod(addr_out[j] + 1, length(ram_out[j]))
+    end
+
+    # @info "$i" stage_in=repr(stage_in) mux_in=repr(mux_in) mux_sel=repr(mux_sel) mux_out=repr(mux_out) stage_out=repr(stage_out) ram_in ram_out
+    append!(output, stage_out)
+  end
+
+  if compact
+    output = collect(skipmissing(output))
+    if length(output) > limit
+      output = output[1:limit]
+    end
+  else
+    if count(x -> !ismissing(x), output) > limit
+      @warn "TODO: apply limit"
+    end
+  end
+
+  output
+end
+
+# the standard way of driving the radix 2 MDC commutator, for depth `d`:
+mdc_permutation(d::Int) = mdc_permutation(d, d, repeat(BitVector([0,1]), inner=d, outer=2))
+
+# the same, but as a Reorder stage
+function mdc_reorder(depth::Int; radix::Int=2)
+  output = mdc_permutation_general(radix, depth)
+  Reorder(output)
+end
+
+# for multi-lane MDC, the permutation ends up being equivalent to a deeper single-lane MDC
+mdc_permutation(d::Int, lanes::Int) = mdc_permutation(d * Int(lanes / 2))
+mdc_reorder(d::Int, lanes::Int) = mdc_reorder(d * Int(lanes / 2))
+
+mdc_reorder(radix::Int, depth::Int, lanes::Int) = mdc_reorder(depth * Int(lanes / radix); radix)
+
 
 function permute_cyclic!(dst::AbstractVector, permutation::Permutation, src::AbstractVector)
   perm = permutation.data

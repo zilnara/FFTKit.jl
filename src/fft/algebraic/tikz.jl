@@ -1,4 +1,6 @@
 
+using TikzPictures
+
 #TODO: put headings over each stage describing it concisely? at least for the SDF stages...
 #TODO: support more stage types
 
@@ -80,7 +82,10 @@ function Base.show(io::IO, ::MIME"text/tikz", tw::Twiddle)
   order = tw.order
   for (i, index) in enumerate(twiddle_indexes(tw, n))
     #println(io, "\\path (stage-in-$cur-$i) edge[\"\$\\omega^{$index}_{$order}\$\"] (stage-out-$cur-$i);")
-    println(io, "\\draw (stage-in-$cur-$i) -- (stage-out-$cur-$i) node[contact, pos=0.35, label=60:\$\\omega^{$index}_{$order}\$] {};")
+    node_shape  = (index == 0 ? "" : "contact")
+    # TODO: indicate trivial rotations differently?
+    tw_text     = (index == 0 ? "" : "\$\\omega^{$index}_{$order}\$")
+    println(io, "\\draw (stage-in-$cur-$i) -- (stage-out-$cur-$i) node[$node_shape, pos=0.35, label=60:$tw_text] {};")
   end
   println(io, "\\end{scope}")
 end

@@ -82,6 +82,90 @@ function input_order(plan::FFTPlan)
   output_order(dual(plan))
 end
 
+# compute the permutation of lanes at a given SDF stage
+# the name could maybe be better; this ignores bit reversals due to the SDF stages themselves,
+# instead giving the permutation relative to what a "normal" FFT structure would see at the given stage
+# (i.e., the plan you would get from `plan(radix(p))`)
+# TODO: there is probably also a more useful primitive; maybe by accounting for SDFs as well,
+#       we can use this to directly compute twiddles without a "schedule"? and with different stage
+#       numbering maybe also make it easier to recalculate twiddles and insert them anywhere,
+#       instead of directly following SDFs only
+function stage_order(p::FFTPlan, stage::Int)
+  if stage < 1
+    error("stage $stage out of range")
+  end
+
+  i = 0; order = input_order(p)
+  j = 0; stages = p.stages
+  while i < stage
+    if j < length(stages)
+      j += 1; s = stages[j]
+      if s isa SDF
+        i += 1
+      else
+        order = output_order(s, order)
+      end
+    else
+      error("stage $stage out of range")
+    end
+  end
+  order
+end
+
+function recompute_twiddles(p::FFTPlan, structure::BTree{Int}; test::Bool=true)
+  new_plan = FFTStage[]
+  normal_plan = plan(radix(p))
+  actual_order = input_order(p)
+
+  # TODO: check that structure actually makes sense for plan
+  schedules = sort(twiddle_schedules(structure))
+
+  num_stages = 0
+  for s in p.stages
+    if s isa SDF
+      push!(new_plan, s)
+      num_stages += 1
+
+      if !isempty(schedules)
+        _, schedule = pop!(schedules)
+        tw = Twiddle(schedule...)
+
+        normal_order = stage_order(normal_plan, num_stages)
+        tw = invperm(Reorder(normal_order)) * Reorder(actual_order) * tw
+
+        push!(new_plan, tw)
+      end
+    elseif s isa Twiddle
+      # discard
+    else
+      actual_order = output_order(s, actual_order)
+      push!(new_plan, s)
+    end 
+  end
+
+  new_plan = FFTPlan(new_plan)
+
+  if test
+    test_fft_plan(new_plan)
+  end
+
+  new_plan
+end
+
+function recompute_twiddles(plan::FFTPlan; order::FFTTwiddleOrder=dif, test::Bool=true)
+  radixes = radix(plan)
+  radix_tree = (order == dif) ? foldr(BTree, radixes) : foldl(BTree, radixes)
+  recompute_twiddles(plan, radix_tree; test)
+end
+
+function triviality_matrix(plan::FFTPlan, lanes::Int)
+  # kind of ugly, could be rewritten... but the point is, this computes a map of which rotators are
+  # non-trivial (0 = trivial, 1 = trivial) for a direct assignment of parallel paths to the plan.
+  # Rows are parallel paths, columns are twiddle stages, value indicates whether the rotator to implement
+  # the given lane of the given stage needs to be non-trivial
+  hcat([any(reshape(.! istrivial.(rotations(s)), lanes, :), dims=2) for s in plan.stages if s isa Twiddle]...)
+end
+
 Base.:(*)(p::FFTPlan, s::FFTStage) = FFTPlan([p.stages..., s])
 Base.:(*)(s::FFTStage, p::FFTPlan) = FFTPlan([s, p.stages...])
 Base.:(*)(x::FFTPlan, y::FFTPlan) = FFTPlan(vcat(x.stages, y.stages))
@@ -197,6 +281,33 @@ function natural_order(p::FFTPlan; rewrite::Bool=true)
   end
   p = set_input_order(p; rewrite=false)
   set_output_order(p; rewrite=false)
+end
+
+function set_stage_depth(p::FFTPlan, depths::AbstractVector{Int}; rewrite::Bool=true, test::Bool=true)
+  stage_num = 1
+  new_plan = FFTStage[]
+  for s in p.stages
+    if s isa SDF && s.depth != depths[stage_num]
+      radix = s.butterfly.radix
+      old_depth = s.depth; new_depth = depths[stage_num]
+      push!(new_plan, Reorder(sdf_regroup_permutation(radix,old_depth,new_depth)))
+      push!(new_plan, SDF(s.butterfly, new_depth, s.inverse))
+      push!(new_plan, Reorder(sdf_regroup_permutation(radix,new_depth,old_depth)))
+    else
+      push!(new_plan, s)
+    end
+  end
+
+  new_plan = FFTPlan(new_plan)
+
+  if rewrite
+    exclude = [fft_rewrite_change_sdf_depth, fft_rewrite_push_reorders_right_past_sdf]
+    new_plan = fft_rewrite(new_plan; test, exclude)
+  elseif test
+    test_fft_plan(new_plan)
+  end
+
+  new_plan
 end
 
 # Using our more exotic primitives, we can't do as much manipulation of them (yet) but we can create plans for various convolutions and cross-correlations:

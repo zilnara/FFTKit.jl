@@ -9,9 +9,12 @@ using Permutations
 using Primes
 using Random
 using Statistics
+
+# TODO: better way to package things to avoid needing to bring in some of these dependencies, which in some
+#       cases bring in lots of stale upstream stuff
 using Symbolics
 using SymbolicUtils
-using TikzPictures
+# using TikzPictures
 using Unitful
 
 include("fft/metrics.jl")

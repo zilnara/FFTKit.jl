@@ -9,7 +9,9 @@ include("algebraic/plan.jl")
 
 include("algebraic/rewrite.jl")
 include("algebraic/test.jl")
-include("algebraic/tikz.jl")
+
+# TODO: figure out better way to package this that avoids bringing in the stale dependencies
+# include("algebraic/tikz.jl")
 
 # TODO: support modeling fixed-point with scaling schedules
 # TODO: support extracting quantized twiddle tables

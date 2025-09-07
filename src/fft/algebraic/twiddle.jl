@@ -132,6 +132,8 @@ end
 
 Base.inv(tw::Twiddle) = Twiddle(tw.order, tw.order .- tw.indexes)
 
+Base.:(*)(r::Reorder, tw::Twiddle) = permute_cyclic(r.perm, tw)
+
 function twiddle_schedules(radix_tree::BTree{Int})
   stages = NTuple{4, Vector{Int}}[]
 

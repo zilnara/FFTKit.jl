@@ -19,6 +19,25 @@ function fft_matrices(plan::FFTPlan)
   [fft_matrix(s, n) for s in plan.stages]
 end
 
+function function_matrix(n::Int, linear_function)
+  basis = I(n)
+  if applicable(linear_function, basis, dims=1)
+    linear_function(basis, dims=1)
+  elseif applicable(linear_function, basis, 1)
+    linear_function(basis, 1)
+  else
+    col_1 = linear_function(basis[:,1])
+    output = similar(col_1, length(col_1), n)
+    output[:,1] = col_1
+
+    for i in 2:n
+      output[:,i] = linear_function(basis[:,i])
+    end
+
+    output
+  end
+end
+
 function dft_matrix(n::Int)
   basis = diagm(repeat([1], n))
   fft(basis, 1)
