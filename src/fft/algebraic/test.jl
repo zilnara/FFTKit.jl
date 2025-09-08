@@ -223,6 +223,10 @@ const PLAN_64PT_MDC_PAD_NATURAL = recompute_twiddles(FFTPlan([
 # the most obvious structure above unfortunately splits some natural radix-4 groups. At the cost
 # of a bit of reordering, we can put them back together and use a radix-4 (or 2^2) structure to
 # eliminate an extra rotator:
+#
+# TODO: this might also be a place where the "triangular matrix" representation provides useful
+#       degrees of freedom.
+# (TODO: fix reorderings, I broke the "padded natural input" property at some point)
 const PLAN_64PT_MDC_PAD_NATURAL_V2 = recompute_twiddles(FFTPlan([
   Reorder([0,2,1,3]) * mdc_reorder(8,4)
   SDF(2,1); SDF(2,2)
@@ -253,16 +257,26 @@ const PLAN_64PT_MDC_R4 = recompute_twiddles(FFTPlan([
 
 # another 4-lane MDC, this one with 4 stages for 256 points, and with 9 nontrivial rotators.
 # Again, the input is in "padded natural" order for use in a correlator
-const PLAN_256PT_MDC_R4 = recompute_twiddles(FFTPlan([
+const PLAN_256PT_MDC_R4 = FFTPlan([
   Reorder([0,2,1,3]); mdc_reorder(32,4)
   SDF(4,1)
+  twiddle_gen_v2([2,2,2,2,2,2,2,2], 7:8, 1:6, [1,6,5,4,3,2,8,7])
   mdc_reorder(16,4); Reorder([0,2,1,3]); mdc_reorder(8,4)
   SDF(4,1)
+  twiddle_gen_v2([2,2,2,2,2,2,2,2], 5:6, 1:4, [1,7,8,4,3,2,6,5])
   mdc_reorder(4,4); Reorder([0,2,1,3]); mdc_reorder(2,4)
+  # instead of the immediately previous twiddle, we can commute it past the MDC reordering
+  # by just changing the digit order as follows (but we wouldn't in this case because it
+  # would increase the number of rotators needed):
+  # twiddle_gen_v2([2,2,2,2,2,2,2,2], 5:6, 1:4, [1,7,8,5,6,2,4,3])
+  # TODO: it may be possible to use this trick to reach 6 rotators in a naive padded-natural-
+  #       order transform which does less reordering
   SDF(4,1)
+  twiddle_gen_v2([2,2,2,2,2,2,2,2], 3:4, 1:2, [1,7,8,5,6,2,4,3])
   Reorder([0,2,1,3]); mdc_reorder(1,4); Reorder([0,2,1,3]); mdc_reorder(32,4)
   SDF(4,1)
-]))
+])
+@test_fft_plan(PLAN_256PT_MDC_R4)
 
 # and now, a big one to experiment with: 16384 points, natural-zero-pad input order, 4 lanes
 # these are getting big, so defer till requseted
