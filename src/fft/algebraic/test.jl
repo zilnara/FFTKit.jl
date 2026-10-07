@@ -8,6 +8,9 @@ function test_fft_plan(plan::FFTPlan, label::String=""; repetitions::Int=10)
   all([x, y, z])
 end
 
+# TODO this doesn't actually use the "expected_function" param. The real goal here, which is not
+#      yet satisfied, is to be able to do things like construct the backward/inverse plan using Base.inv etc.,
+#      and test whether that plan run in the "forward" mode will yield the correct output
 function test_fft_plan(plan::FFTPlan, mode::FFTMode, label::String=""; repetitions::Int=10, expected_function=missing)
   n = transform_length(plan)
 
@@ -44,7 +47,11 @@ function test_fft_plan(plan::FFTPlan, mode::FFTMode, label::String=""; repetitio
 
     randn!(Xoshiro(seed), x)
     mul!(y, plan, x; mode, reorder_input=true, reorder_output=true); if !isone(scale) y .*= inv(scale); end
-    mul!(z, fftw, x)
+    if ismissing(expected_function)
+      mul!(z, fftw, x)
+    else
+      z = expected_function(x)
+    end
 
     err = rms(@. (y - z) / (abs(z) + eps()))
     if err >= err_limit
@@ -279,22 +286,79 @@ const PLAN_256PT_MDC_R4 = FFTPlan([
 @test_fft_plan(PLAN_256PT_MDC_R4)
 
 # and now, a big one to experiment with: 16384 points, natural-zero-pad input order, 4 lanes
-# these are getting big, so defer till requseted
-PLAN_16KPT_MDC_R4(; test::Bool=true) = recompute_twiddles(FFTPlan([
+# (actually define it generically for power-of-4 length, then instantiate one)
+function plan_mdc_r4_4lane_pad_natural(size::Int; retwiddle::Bool=false, test::Bool=true)
+  # TODO support optional extra radix-2 stage?
+
+  # TODO work out for other radix/lane count?
+  # in the places where these are used, i've tried to describe things in terms of the ways
+  # they seem like they should depend on the parameters, but they are not fully correct and
+  # so these values can't just freely change.
+  radix = lanes = 4
+  sequential_size = size ÷ lanes
+  num_sequential_stages = round(Int, log(radix, sequential_size))
+  @assert size == lanes * radix ^ num_sequential_stages
+
+  lane_exchange = mdc_reorder(1, 2)
+
+  stages = FFTStage[]
+  function mdc(stage, depth)
+    push!(stages, lane_exchange)
+    push!(stages, mdc_reorder(depth, radix))
+  end
+  function sdf(stage)
+    push!(stages, SDF(radix,1))
+  end
+  function twiddle(stage)
+    tw = Twiddle([2, 4^(stage-1), 2sequential_size ÷ 4^stage, 4], [1,3], [4])
+    push!(stages, tw)
+  end
+
+  for stage in 1:num_sequential_stages
+    mdc(stage, 2 * sequential_size ÷ radix ^ stage)
+    sdf(stage)
+    twiddle(stage)
+    mdc(stage, sequential_size ÷ radix ^ stage)
+  end
+
+  stage = 1 + num_sequential_stages
+  mdc(stage, size ÷ 2radix)
+  sdf(stage)
+
+  plan = FFTPlan(stages)
+  if retwiddle
+    plan = recompute_twiddles(plan; test=false)
+  end
+  if test
+    test_fft_plan(plan, "plan_mdc_r4_4lane_pad_natural($(size))")
+  end
+
+  plan
+end
+
+const PLAN_16KPT_MDC_R4 = plan_mdc_r4_4lane_pad_natural(16384; test=false)
+
+PLAN_16KPT_MDC_R22(; test::Bool=true) = recompute_twiddles(FFTPlan([
   Reorder([0,2,1,3]) * mdc_reorder(2048,4)
-  SDF(4,1)
+  SDF(2,2); SDF(2,1)
+  
   Reorder([0,2,1,3]) * mdc_reorder(1024,4) * Reorder([0,2,1,3]) * mdc_reorder(512,4)
-  SDF(4,1)
+  SDF(2,2); SDF(2,1)
+  
   Reorder([0,2,1,3]) * mdc_reorder(256,4) * Reorder([0,2,1,3]) * mdc_reorder(128,4)
-  SDF(4,1)
+  SDF(2,2); SDF(2,1)
+  
   Reorder([0,2,1,3]) * mdc_reorder(64,4) * Reorder([0,2,1,3]) * mdc_reorder(32,4)
-  SDF(4,1)
+  SDF(2,2); SDF(2,1)
+  
   Reorder([0,2,1,3]) * mdc_reorder(16,4) * Reorder([0,2,1,3]) * mdc_reorder(8,4)
-  SDF(4,1)
+  SDF(2,2); SDF(2,1)
+  
   Reorder([0,2,1,3]) * mdc_reorder(4,4) * Reorder([0,2,1,3]) * mdc_reorder(2,4)
-  SDF(4,1)
+  SDF(2,2); SDF(2,1)
+  
   Reorder([0,2,1,3]) * mdc_reorder(1,4) * Reorder([0,2,1,3]) * mdc_reorder(2048,4)
-  SDF(4,1)
+  SDF(2,2); SDF(2,1)
 ]); test)
 
 # and for comparison, a R2 version. I haven't exhaustively figured out the best twiddle structure,

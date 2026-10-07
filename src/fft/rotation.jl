@@ -17,9 +17,9 @@ omega_var(n::Int) = get!(() -> Symbolics.variable("ω_$n"), OMEGA_VARS_CACHE, n)
 Base.convert(::Type{Num}, r::Rotation) = Num(r)
 Symbolics.Num(r::Rotation) = omega_var(denominator(r.index)) ^ mod(-numerator(r.index), denominator(r.index))
 
-Complex(r::Rotation) = ComplexF64(r)
-Complex{T}(r::Rotation) where {T<:AbstractFloat} = refine_root_of_unity(denominator(r.index), cispi(2r.index), T_out=T)
-Complex{BigFloat}(r::Rotation; precision::Int=precision(BigFloat)) = refine_root_of_unity(denominator(r.index), cispi(2r.index), T_out=BigFloat, out_prec=precision)
+Base.Complex(r::Rotation) = ComplexF64(r)
+Base.Complex{T}(r::Rotation) where {T<:AbstractFloat} = refine_root_of_unity(denominator(r.index), cispi(2r.index), T_out=T)
+Base.Complex{BigFloat}(r::Rotation; precision::Int=precision(BigFloat)) = refine_root_of_unity(denominator(r.index), cispi(2r.index), T_out=BigFloat, out_prec=precision)
 
 Base.promote_rule(::Type{Rotation}, T::Type{<:Number}) = promote_rule(ComplexF64, T)
 Base.promote_rule(T::Type{<:Number}, ::Type{Rotation}) = promote_rule(T, ComplexF64)

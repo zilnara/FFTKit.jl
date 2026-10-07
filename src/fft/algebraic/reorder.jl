@@ -1,4 +1,7 @@
 
+# TODO give this the same treatment as the twiddle, with specialized types capturing the intent of certain common types of reordering
+# (mainly MDC and other commond bit-exchanges)
+
 struct Reorder
   perm :: Permutation
 

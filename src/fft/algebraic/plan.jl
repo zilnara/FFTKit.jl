@@ -1,5 +1,4 @@
 
-# TODO: add scaling stage
 const FFTStage = Union{SDF, Twiddle, Reorder, Conj, Scale, AdjointR2}
 
 struct FFTPlan
@@ -45,7 +44,7 @@ Base.:(==)(x::FFTPlan, y::FFTPlan) = (x.stages == y.stages)
 Base.copy(x::FFTPlan) = FFTPlan(copy(x.stages))
 
 cost(plan::FFTPlan, n::Int=1) = sum(s -> cost(s,n), plan.stages)
-radix(plan::FFTPlan) = [r for s in plan.stages for r in radix(s)]
+radix(plan::FFTPlan) = collect([r for s in plan.stages for r in radix(s)])
 prefer_inplace(plan::FFTPlan) = all(prefer_inplace, plan.stages) # TODO: should be true whenever an even number of stages want out-of-place?
 transform_length(plan::FFTPlan) = prod(transform_length, plan.stages, init=1)
 dual(x::FFTPlan) = FFTPlan(reverse(dual.(x.stages)))
@@ -114,7 +113,7 @@ end
 
 function recompute_twiddles(p::FFTPlan, structure::BTree{Int}; test::Bool=true)
   new_plan = FFTStage[]
-  normal_plan = plan(radix(p))
+  normal_plan = plan(radix(p), test=false)
   actual_order = input_order(p)
 
   # TODO: check that structure actually makes sense for plan
@@ -131,9 +130,9 @@ function recompute_twiddles(p::FFTPlan, structure::BTree{Int}; test::Bool=true)
         tw = Twiddle(schedule...)
 
         normal_order = stage_order(normal_plan, num_stages)
-        tw = invperm(Reorder(normal_order)) * Reorder(actual_order) * tw
+        tw = (invperm(Reorder(normal_order)) * Reorder(actual_order)) * tw
 
-        push!(new_plan, tw)
+        push!(new_plan, simplify_twiddle(tw))
       end
     elseif s isa Twiddle
       # discard
@@ -160,7 +159,7 @@ end
 
 function triviality_matrix(plan::FFTPlan, lanes::Int)
   # kind of ugly, could be rewritten... but the point is, this computes a map of which rotators are
-  # non-trivial (0 = trivial, 1 = trivial) for a direct assignment of parallel paths to the plan.
+  # non-trivial (0 = trivial, 1 = non-trivial) for a direct assignment of parallel paths to the plan.
   # Rows are parallel paths, columns are twiddle stages, value indicates whether the rotator to implement
   # the given lane of the given stage needs to be non-trivial
   hcat([any(reshape(.! istrivial.(rotations(s)), lanes, :), dims=2) for s in plan.stages if s isa Twiddle]...)
@@ -231,9 +230,8 @@ end
 Base.:(*)(p::FFTPlan, x::AbstractVector) = mul!(similar(x), p, x)
 Base.one(::Type{FFTPlan}) = FFTPlan([])
 
+# Compute a plan to calculate the inverse of the transform described by `p`
 function Base.inv(p::FFTPlan)
-  # note that inv computes the _backward_ form, not inverse. TODO: determine if we can sensibly do the scaling,
-  # in such a way that inv(inv(p)) is at least approximately equal to p. Seems like it should be possible.
   FFTPlan([inv(s) for s in reverse(p.stages)])
 end
 
@@ -295,6 +293,10 @@ function set_stage_depth(p::FFTPlan, depths::AbstractVector{Int}; rewrite::Bool=
       push!(new_plan, Reorder(sdf_regroup_permutation(radix,new_depth,old_depth)))
     else
       push!(new_plan, s)
+    end
+
+    if s isa SDF
+      stage_num += 1
     end
   end
 
