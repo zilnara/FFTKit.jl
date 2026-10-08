@@ -111,6 +111,30 @@ function stage_order(p::FFTPlan, stage::Int)
   order
 end
 
+function stage_digit_order(p::FFTPlan, stage::Int)
+  if stage <= 0
+    return input_order(p)
+  elseif stage > length(p.stages)
+    return output_order(p)
+  end
+
+  normal_plan = plan(radix(p), test=false)
+  actual_order = input_order(p)
+
+  num_sdfs = 0
+  for i in 1:stage
+    s = p.stages[i]
+    if s isa SDF
+      num_sdfs += 1
+      normal_order = stage_order(normal_plan, num_sdfs)
+    else
+      actual_order = output_order(s, actual_order)
+    end 
+  end
+
+  actual_order
+end
+
 function recompute_twiddles(p::FFTPlan, structure::BTree{Int}; test::Bool=true)
   new_plan = FFTStage[]
   normal_plan = plan(radix(p), test=false)

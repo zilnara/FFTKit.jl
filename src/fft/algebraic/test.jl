@@ -180,6 +180,10 @@ const PLAN_64PT_MDC = recompute_twiddles(FFTPlan([
   SDF(2,1)
 ]), order=dif)
 
+# Give a name to a reordering that is used in many 4-lane MDC designs that follow.
+# It's technically also equivalent to mdc_reorder(1, 2) but I think this is a more useful way to think of it
+const MDC_4LANE_SWAP = Reorder([0,2,1,3])
+
 # Another custom MDC, this one with an extra initial reordering stage that allows it to consume
 # natural input order in what I believe is the most efficient way possible.
 # Additionally, another slightly redundant internal delay allows the radix-2^2 form to have as
@@ -196,10 +200,10 @@ const PLAN_64PT_MDC_NATURAL = recompute_twiddles(FFTPlan([
   SDF(2,1)
   mdc_reorder(2,4)
   SDF(2,1)
-  Reorder([0,2,1,3])
+  MDC_4LANE_SWAP
   mdc_reorder(1,4)
   SDF(2,1)
-  Reorder([0,2,1,3])
+  MDC_4LANE_SWAP
   mdc_reorder(1,4)
   SDF(2,1)
   mdc_reorder(8,4)
@@ -218,7 +222,7 @@ const PLAN_64PT_MDC_PAD_NATURAL = recompute_twiddles(FFTPlan([
   SDF(2,1)
   mdc_reorder(1,4)
   SDF(2,1)
-  Reorder([0,2,1,3])
+  MDC_4LANE_SWAP
   SDF(2,1)
 ]), BTree(2, (2, (2, (2, (2, 2))))))
 # the following twiddle structures achieve 7 rotators (the first is the default DIF order):
@@ -232,32 +236,76 @@ const PLAN_64PT_MDC_PAD_NATURAL = recompute_twiddles(FFTPlan([
 # eliminate an extra rotator:
 #
 # TODO: this might also be a place where the "triangular matrix" representation provides useful
-#       degrees of freedom.
-# (TODO: fix reorderings, I broke the "padded natural input" property at some point)
+#       degrees of freedom?
 const PLAN_64PT_MDC_PAD_NATURAL_V2 = recompute_twiddles(FFTPlan([
-  Reorder([0,2,1,3]) * mdc_reorder(8,4)
-  SDF(2,1); SDF(2,2)
-  mdc_reorder(4,4) * Reorder([0,2,1,3]); mdc_reorder(2,4)
-  SDF(2,2); SDF(2,1)
-  Reorder([0,2,1,3]) * mdc_reorder(1,4) * Reorder([0,2,1,3]); mdc_reorder(8,4)
-  SDF(2,2); SDF(2,1)
-]), BTree((2,2),((2,2),(2,2))))
+  # stage orders given as digit order, LSB to MSB.
+  # If the given bit order is used as an array, the coefficient order at each labeled stage
+  # can be computed as: permute_mixed_digits([2,2,2,2,2,2], invperm(bit_order)).
+  # The vertical bar divides the first two bits from the rest; these bits are the ones accessible
+  # by parallel FFT stages (SDF(2,1) and SDF(2,2))
+  #
+  # after the order, a mask is shown indicating which digits have been transformed along
+
+  # TODO document my pen-and-paper method of tabulating these things.
+  # the gist is that the actual stage orders are implicitly anchored by the sequence of SDF stages,
+  # which set the output stages in forward order (or the input stages in reverse order). The rest is
+  # just tracking digit order shuffles and which digits have been transformed over.
+
+  # the third column shows this perspective, starting off with a list of unknown digit places and
+  # solving for them along the way (using output indexes)
+  # Note carefully in particular the difference in digit-reversal between radix 2 and 4 stages.
+
+  # TODO also document how this tabulation makes it clear that you can't do much better than this
+  # if you want to have a "padded natural order" input, unless there's an efficient operation to
+  # shift the digits in the coefficient order (i.e., to go from 12|3456 to 61|2345 or something similar.
+  # it's not an especially HARD transform, but it seems fairly clear it can't be done in a way that
+  # doesn't add at least as much latency as the transforms derived by this method.
+
+  # input             61|2345   __|____   ab|cdef
+  
+  #transform 6
+  SDF(2,1)          # 61|2345   6_|____   1b|cdef [a = 6 in, 1 out]
+  
+  # stash 6, pull up 5 (grouping 56)
+  MDC_4LANE_SWAP    # 16|2345   _6|____   b1|cdef
+  mdc_reorder(8,4)  # 56|2341   _6|____   f1|cdeb
+
+  # transferm 5
+  SDF(2,1)          # 56|2341   56|____   21|cdeb [f = 5 in, 2 out]
+
+  # swap 56 with 34
+  # this can't be done with a simple radix-4 digit swap because 34 is not aligned.
+  mdc_reorder(4,4)  # 46|2351   _6|__5_   e1|cd2b
+  MDC_4LANE_SWAP    # 64|2351   6_|__5_   1e|cd2b
+  mdc_reorder(2,4)  # 34|2651   __|_65_   de|c12b
+
+  # transform 34
+  SDF(4,1)          # 34|2651   34|_65_   34|c12b [de = 34 in, 34 out]
+
+  # stash 3 and 4, swapping them with 1 and 2
+  mdc_reorder(1,4)  # 24|3651   _4|365_   c4|312b
+  MDC_4LANE_SWAP    # 42|3651   4_|365_   4c|312b
+  mdc_reorder(8,4)  # 12|3654   __|3654   ac|3124
+
+  # transform 12
+  SDF(4,1)          # 12|3654   12|3654   56|3124 [ac = 12 in, 56 out]
+]), BTree((2,2),(4,4)))
 
 # it's also possible to create radix-4 MDCs, optionally with natural order input.
 # This one has 6 nontrivial rotations on 4 lanes.
 # TODO: is it possible to define a 4-lane commutator structure that's any cleaner or more efficient than stacking the 2-lane ones as done here?
 const PLAN_64PT_MDC_R4 = recompute_twiddles(FFTPlan([
   mdc_reorder(4,4)
-  Reorder([0,2,1,3])
+  MDC_4LANE_SWAP
   mdc_reorder(8,4)
   SDF(4,1)
   mdc_reorder(2,4)
-  Reorder([0,2,1,3])
+  MDC_4LANE_SWAP
   mdc_reorder(1,4)
   SDF(4,1)
-  Reorder([0,2,1,3])
+  MDC_4LANE_SWAP
   mdc_reorder(8,4)
-  Reorder([0,2,1,3])
+  MDC_4LANE_SWAP
   mdc_reorder(4,4)
   SDF(4,1)
 ]))
@@ -265,13 +313,13 @@ const PLAN_64PT_MDC_R4 = recompute_twiddles(FFTPlan([
 # another 4-lane MDC, this one with 4 stages for 256 points, and with 9 nontrivial rotators.
 # Again, the input is in "padded natural" order for use in a correlator
 const PLAN_256PT_MDC_R4 = FFTPlan([
-  Reorder([0,2,1,3]); mdc_reorder(32,4)
+  MDC_4LANE_SWAP; mdc_reorder(32,4)
   SDF(4,1)
   twiddle_gen_v2([2,2,2,2,2,2,2,2], 7:8, 1:6, [1,6,5,4,3,2,8,7])
-  mdc_reorder(16,4); Reorder([0,2,1,3]); mdc_reorder(8,4)
+  mdc_reorder(16,4); MDC_4LANE_SWAP; mdc_reorder(8,4)
   SDF(4,1)
   twiddle_gen_v2([2,2,2,2,2,2,2,2], 5:6, 1:4, [1,7,8,4,3,2,6,5])
-  mdc_reorder(4,4); Reorder([0,2,1,3]); mdc_reorder(2,4)
+  mdc_reorder(4,4); MDC_4LANE_SWAP; mdc_reorder(2,4)
   # instead of the immediately previous twiddle, we can commute it past the MDC reordering
   # by just changing the digit order as follows (but we wouldn't in this case because it
   # would increase the number of rotators needed):
@@ -280,7 +328,7 @@ const PLAN_256PT_MDC_R4 = FFTPlan([
   #       order transform which does less reordering
   SDF(4,1)
   twiddle_gen_v2([2,2,2,2,2,2,2,2], 3:4, 1:2, [1,7,8,5,6,2,4,3])
-  Reorder([0,2,1,3]); mdc_reorder(1,4); Reorder([0,2,1,3]); mdc_reorder(32,4)
+  MDC_4LANE_SWAP; mdc_reorder(1,4); MDC_4LANE_SWAP; mdc_reorder(32,4)
   SDF(4,1)
 ])
 @test_fft_plan(PLAN_256PT_MDC_R4)
@@ -299,7 +347,7 @@ function plan_mdc_r4_4lane_pad_natural(size::Int; retwiddle::Bool=false, test::B
   num_sequential_stages = round(Int, log(radix, sequential_size))
   @assert size == lanes * radix ^ num_sequential_stages
 
-  lane_exchange = mdc_reorder(1, 2)
+  lane_exchange = MDC_4LANE_SWAP
 
   stages = FFTStage[]
   function mdc(stage, depth)
@@ -339,25 +387,25 @@ end
 const PLAN_16KPT_MDC_R4 = plan_mdc_r4_4lane_pad_natural(16384; test=false)
 
 PLAN_16KPT_MDC_R22(; test::Bool=true) = recompute_twiddles(FFTPlan([
-  Reorder([0,2,1,3]) * mdc_reorder(2048,4)
+  MDC_4LANE_SWAP; mdc_reorder(2048,4)
   SDF(2,2); SDF(2,1)
   
-  Reorder([0,2,1,3]) * mdc_reorder(1024,4) * Reorder([0,2,1,3]) * mdc_reorder(512,4)
+  MDC_4LANE_SWAP; mdc_reorder(1024,4); MDC_4LANE_SWAP; mdc_reorder(512,4)
   SDF(2,2); SDF(2,1)
   
-  Reorder([0,2,1,3]) * mdc_reorder(256,4) * Reorder([0,2,1,3]) * mdc_reorder(128,4)
+  MDC_4LANE_SWAP; mdc_reorder(256,4); MDC_4LANE_SWAP; mdc_reorder(128,4)
   SDF(2,2); SDF(2,1)
   
-  Reorder([0,2,1,3]) * mdc_reorder(64,4) * Reorder([0,2,1,3]) * mdc_reorder(32,4)
+  MDC_4LANE_SWAP; mdc_reorder(64,4); MDC_4LANE_SWAP; mdc_reorder(32,4)
   SDF(2,2); SDF(2,1)
   
-  Reorder([0,2,1,3]) * mdc_reorder(16,4) * Reorder([0,2,1,3]) * mdc_reorder(8,4)
+  MDC_4LANE_SWAP; mdc_reorder(16,4); MDC_4LANE_SWAP; mdc_reorder(8,4)
   SDF(2,2); SDF(2,1)
   
-  Reorder([0,2,1,3]) * mdc_reorder(4,4) * Reorder([0,2,1,3]) * mdc_reorder(2,4)
+  MDC_4LANE_SWAP; mdc_reorder(4,4); MDC_4LANE_SWAP; mdc_reorder(2,4)
   SDF(2,2); SDF(2,1)
   
-  Reorder([0,2,1,3]) * mdc_reorder(1,4) * Reorder([0,2,1,3]) * mdc_reorder(2048,4)
+  MDC_4LANE_SWAP; mdc_reorder(1,4); MDC_4LANE_SWAP; mdc_reorder(2048,4)
   SDF(2,2); SDF(2,1)
 ]); test)
 
@@ -390,7 +438,7 @@ PLAN_16KPT_MDC_R2(; test::Bool=true) = recompute_twiddles(FFTPlan([
   SDF(2,1)
   mdc_reorder(1,4)
   SDF(2,1)
-  Reorder([0,2,1,3])
+  MDC_4LANE_SWAP
   SDF(2,1)
 ]); test)
 
