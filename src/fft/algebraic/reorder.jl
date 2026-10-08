@@ -1,17 +1,57 @@
 
+struct DigitReorder
+  radix :: Vector{Int}
+  digit_perm :: Vector{Int}
+
+  function DigitReorder(radix :: Vector{Int}, digit_perm::Union{Permutation, Vector{Int}}; simplify::Bool=true)
+    if digit_perm isa Vector{Int}
+      m = minimum(digit_perm)
+      if m != 1
+        digit_perm = digit_perm .- (minimum(digit_perm) - 1)
+      end
+      @assert isperm(digit_perm)
+    else
+      digit_perm = digit_perm.data
+    end
+
+    @assert length(radix) == length(digit_perm)
+
+    if simplify && digit_perm == [3,2,1] && radix[1] == radix[3] && 
+      return MdcReorder(radix[2], radix[1])
+    end
+
+    new(radix, digit_perm)
+  end
+end
+
+Base.length(r::DigitReorder) = prod(r.radix)
+Base.inv(r::DigitReorder) = DigitReorder(r.radix[r.digit_perm], invperm(r.digit_perm))
+Permutations.Permutation(r::DigitReorder) = remove_outer_cycles(permute_mixed_digits(r.radix, r.digit_perm))
+
+function Base.repeat(r::DigitReorder; inner::Int=1, outer::Int=1)
+  if inner == 1
+    return r
+  end
+
+  DigitReorder(Int[inner, r.radix...], Int[1, (1 .+ r.digit_perm)...])
+end
+
+Base.show(io::IO, r::DigitReorder) = print(io, "DigitReorder($(r.radix), $(r.digit_perm))")
+
 # TODO: document this from the perspective of bit/digit swaps, which give good intuition for overall MDC transform design.
 # Generalizing to "swap digits N,M of radix R" is likely to be useful too. in the MDC case, it's that but with N or M fixed to 1.
 # In the general case, it can be done with mixed radix transforms as well, which could potentially be useful for
 # MDC transforms with composite lane counts such as 6.
 struct MdcReorder
-  depth :: Int
   radix :: Int
+  depth :: Int
 end
 
 Base.length(r::MdcReorder) = r.depth * r.radix ^ 2
 Base.inv(r::MdcReorder) = r # all mdc reorders are involutions
 
-function permutation(r::MdcReorder)
+DigitReorder(r::MdcReorder) = DigitReorder([r.radix, r.depth, r.radix], [3,2,1]; simplify=false)
+function Permutations.Permutation(r::MdcReorder)
   Reorder(mdc_permutation_general(r.radix, r.depth)).perm
 end
 
@@ -20,53 +60,25 @@ function Base.repeat(r::MdcReorder; inner::Int=1, outer::Int=1)
     return r
   end
 
-  # TODO can this be representad as another MdcReorder?
-  # probably not without expanding the representation in some way
-  repeat(Reorder(permutation(r)); inner, outer)
+  repeat(DigitReorder(r); inner)
 end
 
-Base.show(io::IO, r::MdcReorder) = print(io, "MdcReorder($(r.depth), $(r.radix))")
+Base.show(io::IO, r::MdcReorder) = print(io, "MdcReorder($(r.radix), $(r.depth))")
 
 struct ArbitraryReorder
   perm :: Permutation
 
   function ArbitraryReorder(perm::Permutation)
-    data = perm.data
-    reduced = false
-
-    # normalize length by removing outer cycles.
-    # That is, remove duplicate parallel copies of the same permutation. For example:
-    #   reduce (1,2)(3,4)(5,6) to just (1,2)
-    #   reduce (1)(2,3)(4)(5)(6,7)(8) to just (1)(2,3)(4)
-    # and so on.
-    for (p, pow) in factor(length(data))
-      while pow > 0
-        x = copy(reshape(data, :, p))
-        q = size(x, 1)
-        for i in 1:size(x, 2)
-          x[:,i] .-= (i-1) * q
-        end
-        if all(x .== x[:,1])
-          data = x[:,1]; reduced = true
-          pow -= 1
-        else
-          break
-        end
-      end
-    end
-
-    if reduced
-      perm = Permutation(data)
-    end
-
-    new(perm)
+    new(remove_outer_cycles(perm))
   end
 end
+
+ArbitraryReorder(r::Union{DigitReorder,MdcReorder}) = ArbitraryReorder(Permutation(r))
 
 Base.length(r::ArbitraryReorder) = length(r.perm)
 Base.inv(r::ArbitraryReorder) = ArbitraryReorder(inv(r.perm))
 
-function permutation(r::ArbitraryReorder)
+function Permutations.Permutation(r::ArbitraryReorder)
   r.perm
 end
 
@@ -78,7 +90,7 @@ end
 
 Base.show(io::IO, r::ArbitraryReorder) = print(io, "Reorder($(r.perm.data .- 1))")
 
-const Reorder = Union{MdcReorder, ArbitraryReorder}
+const Reorder = Union{DigitReorder, MdcReorder, ArbitraryReorder}
 
 function Reorder(perm::Union{Permutation, Vector{Int}})
   if perm isa Vector
@@ -87,7 +99,7 @@ function Reorder(perm::Union{Permutation, Vector{Int}})
   ArbitraryReorder(perm)
 end
 
-Base.:(==)(x::Reorder, y::Reorder) = permutation(x) == permutation(y)
+Base.:(==)(x::Reorder, y::Reorder) = Permutation(x) == Permutation(y)
 
 function extend_perm(perm::Vector{Int}, n::Int)
   p = length(perm)
@@ -108,14 +120,14 @@ radix(::Reorder) = Int[]
 transform_length(::Reorder) = 1 # No inherent length; length comes from butterflies
 dual(r::Reorder) = inv(r)
 
-output_order(r::Reorder, in_order::AbstractVector=1:length(r)) = permute_cyclic(permutation(r), in_order)
-input_order(r::Reorder, out_order::AbstractVector=1:length(r)) = permute_cyclic(inv(permutation(r)), out_order)
+output_order(r::Reorder, in_order::AbstractVector=1:length(r)) = permute_cyclic(Permutation(r), in_order)
+input_order(r::Reorder, out_order::AbstractVector=1:length(r)) = permute_cyclic(inv(Permutation(r)), out_order)
 
-function permutation_vec(r::Reorder, n::Int=length(r.perm); inv::Bool=false)
-  perm = permutation(r)
+function permutation_data(r::Reorder, n::Int=-1; inv::Bool=false)
+  perm = Permutation(r)
   inv && (perm = Base.inv(perm))
   perm = perm.data
-  length(perm) == n ? perm : extend_perm(perm, n)
+  (n < 0 || length(perm) == n) ? perm : extend_perm(perm, n)
 end
 
 function Base.repeat(p::Permutation; inner::Int=1, outer::Int=1)
@@ -137,11 +149,11 @@ function Base.repeat(p::Permutation; inner::Int=1, outer::Int=1)
 end
 
 function LinearAlgebra.mul!(dst::AbstractVector, r::Reorder, src::AbstractVector; mode::FFTMode=forward)
-  permute_cyclic!(dst, permutation(r), src)
+  permute_cyclic!(dst, Permutation(r), src)
 end
 
 Base.:(*)(r::Reorder, x::AbstractVector) = mul!(similar(x), r, x)
-Base.:(*)(r1::Reorder, r2::Reorder) = Reorder(permute_cyclic(permutation(r1), permutation(r2)))
+Base.:(*)(r1::Reorder, r2::Reorder) = Reorder(permute_cyclic(Permutation(r1), Permutation(r2)))
 Base.one(::Type{Reorder}) = Reorder(Permutation(1))
 Base.inv(r::Reorder) = invperm(r)
 Base.invperm(r::Reorder) = Reorder(inv(r.perm))
@@ -284,17 +296,39 @@ end
 # the standard way of driving the radix 2 MDC commutator, for depth `d`:
 mdc_permutation(d::Int) = mdc_permutation(d, d, repeat(BitVector([0,1]), inner=d, outer=2))
 
-# the same, but as a Reorder stage
-function mdc_reorder(depth::Int; radix::Int=2)
-  MdcReorder(depth, radix)
-end
-
 # for multi-lane MDC, the permutation ends up being equivalent to a deeper single-lane MDC
-mdc_permutation(d::Int, lanes::Int) = mdc_permutation(d * Int(lanes / 2))
-mdc_reorder(d::Int, lanes::Int) = mdc_reorder(d * Int(lanes / 2))
+mdc_permutation(d::Int, lanes::Int) = mdc_permutation(d * lanes ÷ 2)
 
-mdc_reorder(radix::Int, depth::Int, lanes::Int) = mdc_reorder(depth * Int(lanes / radix); radix)
+mdc_reorder(radix::Int, depth::Int, lanes::Int) = MdcReorder(radix, depth * lanes ÷ radix)
 
+
+function remove_outer_cycles(perm::Permutation)
+  data = perm.data
+  reduced = false
+
+  # normalize length by removing outer cycles.
+  # That is, remove duplicate parallel copies of the same permutation. For example:
+  #   reduce (1,2)(3,4)(5,6) to just (1,2)
+  #   reduce (1)(2,3)(4)(5)(6,7)(8) to just (1)(2,3)(4)
+  # and so on.
+  for (p, pow) in factor(length(data))
+    while pow > 0
+      x = copy(reshape(data, :, p))
+      q = size(x, 1)
+      for i in 1:size(x, 2)
+        x[:,i] .-= (i-1) * q
+      end
+      if all(x .== x[:,1])
+        data = x[:,1]; reduced = true
+        pow -= 1
+      else
+        break
+      end
+    end
+  end
+
+  reduced ? Permutation(data) : perm
+end
 
 function permute_cyclic!(dst::AbstractVector, perm::Permutation, src::AbstractVector)
   perm = perm.data
@@ -344,11 +378,11 @@ function permute_cyclic(p1::Permutation, p2::Permutation)
 end
 
 function fft_rewrite_merge_reorders(r1::Reorder, r2::Reorder)
-  Reorder(permute_cyclic(permutation(r1), permutation(r2)))
+  Reorder(permute_cyclic(Permutation(r1), Permutation(r2)))
 end
 
 function fft_rewrite_delete_identities(r::Reorder)
-  isone(permutation(r)) ? [] : false
+  isone(Permutation(r)) ? [] : false
 end
 
 function fft_rewrite_delete_initial_reorder(stages::Vector, pos::UnitRange)

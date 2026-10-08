@@ -35,6 +35,11 @@ function plan(radix_tree::BTree; dual::Bool=false, test::Bool=true)
   plan
 end
 
+# A common misconception is that DIF and DIT specify the structure of the stage delays.
+# It actually refers to two particular ways out of many to structure the rotation stages,
+# and is independent of the structure of the delays.
+@enum FFTTwiddleOrder dif dit
+export FFTTwiddleOrder, dif, dit
 function plan(radixes::Vector{Int}; order::FFTTwiddleOrder=dif, dual::Bool=false, test::Bool=true)
   radix_tree = (order == dif) ? foldr(BTree, radixes) : foldl(BTree, radixes)
   plan(radix_tree; dual, test)
