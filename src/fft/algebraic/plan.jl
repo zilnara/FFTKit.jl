@@ -194,6 +194,29 @@ function triviality_matrix(plan::FFTPlan, lanes::Int)
   hcat([any(reshape(.! istrivial.(rotations(s)), lanes, :), dims=2) for s in plan.stages if s isa Twiddle]...)
 end
 
+function order_matrix(plan::FFTPlan, lanes::Int)
+  # just as ugly as triviality_matrix, does more or less the same thing except it returns the actual
+  # order of rotation for each rotator in a multi-lane structure
+  hcat([mapslices(lcm, reshape(order.(rotations(s)), lanes, :), dims=2) for s in plan.stages if s isa Twiddle]...)
+end
+
+function max_rotation_matrix(plan::FFTPlan, lanes::Int)
+  function max_rotation(rs)
+    rotation  = argmax(r -> mod(r.index, r.index.den), rs)
+    order     = lcm([r.index.den for r in rs])
+    a = Int(rotation.index * order)
+    a = mod(a, order)
+    (a, order)
+  end
+  function stage_max_rotations(s)
+    rs = rotations(s)
+    n  = lcm(lanes, length(rs)) ÷ length(rs)
+    rs = repeat(rs, outer=n)
+    reshape(rs, lanes, :)
+  end
+  hcat([mapslices(max_rotation, stage_max_rotations(s), dims=2) for s in plan.stages if s isa Twiddle]...)
+end
+
 Base.:(*)(p::FFTPlan, s::FFTStage) = FFTPlan([p.stages..., s])
 Base.:(*)(s::FFTStage, p::FFTPlan) = FFTPlan([s, p.stages...])
 Base.:(*)(x::FFTPlan, y::FFTPlan) = FFTPlan(vcat(x.stages, y.stages))

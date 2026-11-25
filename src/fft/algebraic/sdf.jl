@@ -4,9 +4,10 @@ struct Butterfly
   apply     :: Function
   apply!    :: Function
   cost      :: Cost
+  is_fftw   :: Bool
 
-  Butterfly(radix::Int, apply::Function, apply!::Function) = new(radix, apply, apply!, cost(apply))
-  Butterfly(radix::Int, apply::Function, apply!::Function, cost::Cost) = new(radix, apply, apply!, cost)
+  Butterfly(radix::Int, apply::Function, apply!::Function) = new(radix, apply, apply!, cost(apply), false)
+  Butterfly(radix::Int, apply::Function, apply!::Function, cost::Cost, is_fftw::Bool=false) = new(radix, apply, apply!, cost, is_fftw)
 end
 
 Base.:(==)(x::Butterfly, y::Butterfly) = (x.radix == y.radix) && (x.cost == y.cost)
@@ -15,8 +16,9 @@ const R2 = Butterfly(2, r2, r2!)
 const R3 = Butterfly(3, r3, r3!)
 const R4 = Butterfly(4, r4, r4!)
 const R5 = Butterfly(5, r5, r5!)
+const R8 = Butterfly(8, r8, r8!)
 
-const FIXED_BUTTERFLIES = [R2, R3, R4, R5]
+const FIXED_BUTTERFLIES = [R2, R3, R4, R5, R8]
 
 function fftw_butterfly(radix::Int)
   # to play with radixes we haven't implemented, define a butterfly that just uses fftw
@@ -30,6 +32,11 @@ function fftw_butterfly(radix::Int)
       fft_src = T.(fft_src)
     end
 
+    # TODO what can we do to make this true more often? When/why is a reshaped array NOT a StridedArray?
+    if !(fft_src isa StridedArray)
+      fft_src = copy(fft_src)
+    end
+
     if mode == forward
       p = plan_fft(fft_src, 1)
     elseif mode == backward
@@ -38,7 +45,12 @@ function fftw_butterfly(radix::Int)
       p = plan_ifft(fft_src, 1)
     end
 
-    mul!(fft_dst, p, fft_src)
+    # TODO what can we do to make this true more often? When/why is a reshaped array NOT a StridedArray?
+    if fft_dst isa StridedArray
+      mul!(fft_dst, p, fft_src)
+    else
+      fft_dst .= p * fft_src
+    end
 
     dst
   end
@@ -61,7 +73,7 @@ function fftw_butterfly(radix::Int)
 
   c = Cost(UNKNOWN_COST=>1)
 
-  Butterfly(radix, apply, apply!, c)
+  Butterfly(radix, apply, apply!, c, true)
 end
 
 function Butterfly(radix::Int)
@@ -95,7 +107,7 @@ struct SDF
   inverse   :: Bool
 end
 
-SDF(radix::Int, depth::Int, inverse::Bool=false) = SDF(Butterfly(radix), depth, inverse)
+SDF(radix::Int, depth::Int=1, inverse::Bool=false) = SDF(Butterfly(radix), depth, inverse)
 
 Base.:(==)(x::SDF, y::SDF) = (x.butterfly == y.butterfly) && (x.depth == y.depth)
 
@@ -103,11 +115,15 @@ function Base.show(io::IO, s::SDF)
   if s.inverse
     print(io, "inv(")
   end
-  if in(s.butterfly, FIXED_BUTTERFLIES)
-    print(io, "SDF($(s.butterfly.radix), $(s.depth))")
+  if s.butterfly.is_fftw || in(s.butterfly, FIXED_BUTTERFLIES)
+    print(io, "SDF($(s.butterfly.radix)")
   else
-    print(io, "SDF($(s.butterfly), $(s.depth))")
+    print(io, "SDF($(s.butterfly)")
   end
+  if s.depth != 1
+    print(io, ", $(s.depth)")
+  end
+  print(io, ")")
   if s.inverse
     print(io, ")")
   end

@@ -21,7 +21,12 @@ end
 
 twiddle_order(tw::StandardTwiddle) = prod(tw.p) * tw.q
 twiddle_inner_repeat_lenth(tw::StandardTwiddle) = tw.o
-function twiddle_indexes(tw::StandardTwiddle)
+twiddle_structure_p(tw::StandardTwiddle) = [tw.p..., tw.q]
+twiddle_structure_q(tw::StandardTwiddle) = [tw.q, tw.p...]
+
+twiddle_indexes_p(tw::StandardTwiddle) = twiddle_indexes(tw, pq_mul = (p, q) -> p)
+twiddle_indexes_q(tw::StandardTwiddle) = twiddle_indexes(tw, pq_mul = (p, q) -> q)
+function twiddle_indexes(tw::StandardTwiddle; pq_mul = Base.:(*))
   P = prod(tw.p); Q = tw.q; O = tw.o;
   P_perm = inv(permute_mixed_digits(tw.p, length(tw.p):-1:1))
 
@@ -30,7 +35,7 @@ function twiddle_indexes(tw::StandardTwiddle)
 
   tw = Array{Int}(undef,O,Q,P)
   for i in 0:Q-1, j in 0:P-1
-    k = i * (P_perm[j+1]-1)
+    k = pq_mul((P_perm[j+1]-1), i)
     if conj && k != 0
       k = - k
     end
@@ -136,6 +141,48 @@ function twiddle_order(tw::ExtendedTwiddle)
   P = prod(tw.radix[tw.p_digits])
   Q = prod(tw.radix[tw.q_digits])
   P * Q
+end
+
+twiddle_structure_p(tw::ExtendedTwiddle) = tw.radix[[tw.p_digits..., tw.q_digits...]]
+twiddle_structure_q(tw::ExtendedTwiddle) = tw.radix[[tw.q_digits..., tw.p_digits...]]
+
+twiddle_indexes_p(tw::ExtendedTwiddle) = twiddle_indexes(tw, pq_mul = (p, q) -> p)
+twiddle_indexes_q(tw::ExtendedTwiddle) = twiddle_indexes(tw, pq_mul = (p, q) -> q)
+function twiddle_indexes(tw::ExtendedTwiddle; pq_mul = Base.:(*))
+  N = length(tw.radix)
+  n = prod(tw.radix)
+
+  counters = zeros(Int,N)
+  p_stride = cumprod([1; tw.radix[tw.p_digits]])[1:end-1]
+  q_stride = cumprod([1; tw.radix[tw.q_digits]])[1:end-1]
+
+  indexes = Int[]
+  order = twiddle_order(tw)
+
+  for _ in 1:n
+    p = sum(counters[tw.p_digits] .* p_stride)
+    q = sum(counters[tw.q_digits] .* q_stride)
+    k = pq_mul(p, q)
+    if tw.conj && k != 0
+      k = order - k
+    end
+    push!(indexes, k)
+
+    # TODO: consider rewriting this to use little-endian order with carries forward
+    carry = 1
+    for i in N:-1:1
+      counters[i] += carry
+      if counters[i] >= tw.radix[i]
+        counters[i] = 0
+        carry = 1
+      else
+        carry = 0
+      end
+    end
+  end
+
+  # TODO: mod necessary? can it be avoided by smarter construction?
+  mod.(indexes, order)
 end
 
 function twiddle_indexes(tw::ExtendedTwiddle)
@@ -331,6 +378,8 @@ function simplify_extended_twiddle(radix::AbstractVector{Int}, p_digits::Abstrac
   radix, p_digits, q_digits
 end
 
+const StructuredTwiddle = Union{StandardTwiddle, ExtendedTwiddle}
+
 struct ArbitraryTwiddle
   order       :: Int
   indexes     :: Vector{Int}
@@ -360,7 +409,7 @@ function ArbitraryTwiddle(indexes::AbstractVector{<:Integer})
   ArbitraryTwiddle(length(indexes), indexes)
 end
 
-function ArbitraryTwiddle(tw::Union{StandardTwiddle, ExtendedTwiddle})
+function ArbitraryTwiddle(tw::StructuredTwiddle)
   ArbitraryTwiddle(twiddle_order(tw), twiddle_indexes(tw))
 end
 
@@ -544,6 +593,14 @@ function LinearAlgebra.mul!(dst::AbstractVector, tw::Twiddle, src::AbstractVecto
 end
 
 Base.:(*)(r::Reorder, tw::Twiddle) = permute_cyclic(r.perm, tw)
+
+# TODO audit the order of multiply operations and make it more consistent, it's a mess
+function Base.:(*)(tw::Twiddle, x::AbstractVector; mode::FFTMode=forward)
+  T = promote_type(float(eltype(x)), Complex{Float64})
+  y = similar(x, T)
+  mul!(y, tw, x; mode)
+  y
+end
 
 function twiddle_schedules(radix_tree::BTree{Int})
   stages = NTuple{4, Vector{Int}}[]
@@ -779,3 +836,66 @@ function simplify_twiddle(tw::Twiddle)
     maybe_subst
   end
 end
+
+# look at how the twiddle maps to hardware lanes and, for each lane, calculate a mask of which radix digits are ever nonzero.
+function twiddle_lane_structure(tw::StructuredTwiddle, lanes::Int; prime_decomp::Bool=true)
+  radix::Vector{Int} = twiddle_structure_p(tw)
+  twiddle_lane_structure(tw, lanes, radix; prime_decomp)
+end
+
+function twiddle_lane_structure(tw::Twiddle, lanes::Int, radix::Vector{Int}; prime_decomp::Bool=true)
+  indexes = twiddle_indexes(tw)
+  n = lcm(lanes, length(indexes))
+  m = length(indexes) ÷ n
+  if m != 1
+    indexes = repeat(indexes, outer=m)
+  end
+  indexes = reshape(indexes, lanes, :)
+
+  if prime_decomp
+    prime_radix = Int[]
+    for r in radix
+      for (p, n) in eachfactor(r)
+        for i in 1:n
+          push!(prime_radix, p)
+        end
+      end
+    end
+
+    radix = prime_radix
+  end
+
+  lane_digits = [Set{Int}() for i in 1:lanes, j in radix]
+  for lane in 1:lanes
+    for decomp in [to_mixed_digits(p, radix) for p in indexes[lane, :]]
+      for (i, x) in enumerate(decomp)
+        push!(lane_digits[lane, i], x)
+      end
+    end
+  end
+
+  radix, lane_digits
+end
+
+function twiddle_lane_bit_masks(tw::Twiddle, lanes::Int)
+  n = twiddle_order(tw)
+  if !ispow2(n)
+    @warn "order is not a power of 2; using next power of 2"
+    n = nextpow(2, n)
+  end
+  radix, lane_bits = twiddle_lane_structure(tw, lanes, [n])
+
+  lane_zero_masks = .~ zeros(UInt64, lanes)
+  lane_one_masks  =    zeros(UInt64, lanes)
+  for lane in 1:lanes, bit in 1:length(radix)
+    if lane_bits[lane, bit] != Set([0])
+      lane_zero_masks[lane] &= ~(UInt64(1) << (bit-1))
+    end
+    if lane_bits[lane, bit] == Set([1])
+      lane_one_masks[lane] |= UInt64(1) << (bit-1)
+    end
+  end
+
+  hcat(lane_zero_masks, lane_one_masks)
+end
+

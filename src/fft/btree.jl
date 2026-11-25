@@ -44,6 +44,8 @@ end
 Base.reverse(t::Leaf) = t
 Base.reverse(t::BNode{T}) where T = BNode{T}(reverse(t.r), reverse(t.l))
 
+dual(t::BTree) = reverse(t)
+
 # a slightly nicer constructor
 BTree(x) = Leaf(x)
 BTree(x,y) = BNode(BTree(x), BTree(y))

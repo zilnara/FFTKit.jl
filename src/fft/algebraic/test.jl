@@ -28,9 +28,9 @@ function test_fft_plan(plan::FFTPlan, mode::FFTMode, label::String=""; repetitio
   err_limit = k * q * eps() * log2(n)
 
   rms(x) = sqrt(mean(abs2, x))
-  x = Array{ComplexF64}(undef, n)
-  y = Array{ComplexF64}(undef, n)
-  z = Array{ComplexF64}(undef, n)
+  x = Vector{ComplexF64}(undef, n)
+  y = Vector{ComplexF64}(undef, n)
+  z = Vector{ComplexF64}(undef, n)
 
   if mode == forward
     fftw = plan_fft(x)
@@ -182,7 +182,7 @@ const PLAN_64PT_MDC = recompute_twiddles(FFTPlan([
 
 # Give a name to a reordering that is used in many 4-lane MDC designs that follow.
 # It's technically also equivalent to MdcReorder(2, 1) but I think this is a more useful way to think of it
-const MDC_4LANE_SWAP = Reorder([0,2,1,3])
+const MDC_4LANE_SWAP = MdcReorder(2,1)
 
 # Another custom MDC, this one with an extra initial reordering stage that allows it to consume
 # natural input order in what I believe is the most efficient way possible.
@@ -333,10 +333,54 @@ const PLAN_256PT_MDC_R4 = FFTPlan([
 ])
 @test_fft_plan(PLAN_256PT_MDC_R4)
 
+function plan_mdc(radix::Int, num_stages::Int; retwiddle::Bool=false, test::Bool=true)
+  stages = FFTStage[]
+  for i in num_stages-1:-1:1
+    push!(stages, SDF(radix, 1))
+    push!(stages, Twiddle([radix^i], radix, 1))
+    push!(stages, MdcReorder(radix, radix^(i-1)))
+  end
+  push!(stages, SDF(radix, 1))
+
+  plan = FFTPlan(stages)
+  if retwiddle
+    plan = recompute_twiddles(plan; test=false)
+  end
+  if test
+    test_fft_plan(plan, "plan_mdc($(radix), $(num_stages))")
+  end
+
+  plan
+end
+
+function plan_mdc_natural(radix::Int, num_stages::Int; retwiddle::Bool=false, test::Bool=true)
+  stages = FFTStage[]
+
+  for i in num_stages-1:-1:1
+    push!(stages, MdcReorder(radix, radix^(i-1)))
+    push!(stages, SDF(radix, 1))
+
+    j = num_stages-i
+    push!(stages, Twiddle([radix, radix^(j-1), radix^(i-1), radix], [1,3], [4]))
+  end
+  push!(stages, MdcReorder(radix, radix^(num_stages-2)))
+  push!(stages, SDF(radix, 1))
+
+  plan = FFTPlan(stages)
+  if retwiddle
+    plan = recompute_twiddles(plan; test=false)
+  end
+  if test
+    test_fft_plan(plan, "plan_mdc_natural($(radix), $(num_stages))")
+  end
+
+  plan
+end
+
 # and now, a big one to experiment with: 16384 points, natural-zero-pad input order, 4 lanes
-# (actually define it generically for power-of-4 length, then instantiate one)
+# (actually, define it generically for power-of-2 length and then instantiate one)
 function plan_mdc_r4_4lane_pad_natural(size::Int; retwiddle::Bool=false, test::Bool=true)
-  # TODO support optional extra radix-2 stage?
+  # TODO probably not really important but support degenerate cases down to size 1/2/4?
 
   # TODO work out for other radix/lane count?
   # in the places where these are used, i've tried to describe things in terms of the ways
@@ -344,34 +388,52 @@ function plan_mdc_r4_4lane_pad_natural(size::Int; retwiddle::Bool=false, test::B
   # so these values can't just freely change.
   radix = lanes = 4
   sequential_size = size ÷ lanes
-  num_sequential_stages = round(Int, log(radix, sequential_size))
-  @assert size == lanes * radix ^ num_sequential_stages
+  log2_size = round(Int, log2(sequential_size))
+  @assert size == lanes * 2 ^ log2_size
 
-  lane_exchange = MDC_4LANE_SWAP
+  num_sequential_stages = log2_size ÷ 2
+  extra_r2_stage        = isodd(log2_size)
 
   stages = FFTStage[]
-  function mdc(stage, depth)
-    push!(stages, lane_exchange)
-    push!(stages, MdcReorder(2, depth * radix ÷ 2))
-  end
-  function sdf(stage)
-    push!(stages, SDF(radix,1))
-  end
-  function twiddle(stage)
-    tw = Twiddle([2, 4^(stage-1), 2sequential_size ÷ 4^stage, 4], [1,3], [4])
-    push!(stages, tw)
+
+  # first stage reorders in a way that moves the least-significant bit of the index to the most,
+  # and moves the most-signficatnt to the second (effectively rotating the index by 1 bit). The
+  # rest of the stages transform each successive 2-bit chunk, from most to least significant.
+  # This is what creates the "padded-natural" input order.
+  #
+  # The code here to generate an extra R2 stage at the beginning for odd-power-of-2 size is
+  # kinda janky but should work. It could use some refactoring.
+  stage = 1
+  odd_q = 1
+  if extra_r2_stage
+    sequential_size ÷= 2
+    odd_q = 2
+
+    push!(stages, SDF(2, 1))
+    push!(stages, Twiddle([size ÷ 2], 2, 1))
+    push!(stages, MdcReorder(4, sequential_size ÷ 2))
+  else
+    push!(stages, MdcReorder(2, 1))
+    push!(stages, MdcReorder(2, sequential_size))
   end
 
   for stage in 1:num_sequential_stages
-    mdc(stage, 2 * sequential_size ÷ radix ^ stage)
-    sdf(stage)
-    twiddle(stage)
-    mdc(stage, sequential_size ÷ radix ^ stage)
+    push!(stages, SDF(radix,1))
+
+    tw = Twiddle([2, odd_q * 4^(stage-1), 2sequential_size ÷ 4^stage, 4], [1,3], [4])
+    push!(stages, tw)
+
+    if stage < num_sequential_stages
+      push!(stages, MdcReorder(radix, 2 * sequential_size ÷ radix ^ (stage + 1)))
+    end
   end
 
+  # last stage has to collect the final 2 bits from opposite ends of the index order,
+  # transforming both using a radix-4 stage.
   stage = 1 + num_sequential_stages
-  mdc(stage, size ÷ 2radix)
-  sdf(stage)
+  push!(stages, repeat(MdcReorder(2,1), inner=2))
+  push!(stages, MdcReorder(2, size ÷ radix))
+  push!(stages, SDF(radix,1))
 
   plan = FFTPlan(stages)
   if retwiddle
@@ -385,6 +447,119 @@ function plan_mdc_r4_4lane_pad_natural(size::Int; retwiddle::Bool=false, test::B
 end
 
 const PLAN_16KPT_MDC_R4 = plan_mdc_r4_4lane_pad_natural(16384; test=false)
+
+# there are 2 obvious ways to expand 4-lane "pad natural" mdc planning to handle
+# odd powers of 2. Currently it implements this V1, but V2 is another viable option.
+#
+# At the moment I don't see any obvious reason to favor either.
+const PLAN_32KPT_MDC_R4_V1 = FFTPlan([
+  SDF(2, 1)
+  Twiddle([16384], 2, 1)
+  MdcReorder(4, 2048)
+  SDF(4, 1)
+  Twiddle([2, 2, 2048, 4], [1, 3], [4])
+  MdcReorder(4, 512)
+  SDF(4, 1)
+  Twiddle([2, 8, 512, 4], [1, 3], [4])
+  MdcReorder(4, 128)
+  SDF(4, 1)
+  Twiddle([2, 32, 128, 4], [1, 3], [4])
+  MdcReorder(4, 32)
+  SDF(4, 1)
+  Twiddle([2, 128, 32, 4], [1, 3], [4])
+  MdcReorder(4, 8)
+  SDF(4, 1)
+  Twiddle([2, 512, 8, 4], [1, 3], [4])
+  MdcReorder(4, 2)
+  SDF(4, 1)
+  Twiddle([2, 2048, 2, 4], [1, 3], [4])
+  repeat(MdcReorder(2,1), inner=2)
+  MdcReorder(2, 8192)
+  SDF(4, 1)
+])
+
+const PLAN_32KPT_MDC_R4_V2 = FFTPlan([
+  MdcReorder(2, 1)
+  MdcReorder(2, 8192)
+  SDF(4, 1)
+  Twiddle([2, 4096], 4, 1)
+  MdcReorder(4, 1024)
+  SDF(4, 1)
+  Twiddle([2, 4, 1024, 4], [1, 3], [4])
+  MdcReorder(4, 256)
+  SDF(4, 1)
+  Twiddle([2, 16, 256, 4], [1, 3], [4])
+  MdcReorder(4, 64)
+  SDF(4, 1)
+  Twiddle([2, 64, 64, 4], [1, 3], [4])
+  MdcReorder(4, 16)
+  SDF(4, 1)
+  Twiddle([2, 256, 16, 4], [1, 3], [4])
+  MdcReorder(4, 4)
+  SDF(4, 1)
+  Twiddle([2, 1024, 4, 4], [1, 3], [4])
+  MdcReorder(4, 1)
+  SDF(4, 1)
+  Twiddle([2, 4096, 4], [1], [3])
+  MdcReorder(2, 8192)
+  SDF(2, 1)
+])
+
+# and an 8-lane radix-8 version, also "padded natural order"
+# TODO calculate twiddles
+# TODO work on generalizing the 4-lane planning function to
+#      cover this and higher power-of-2 lane counts
+const PLAN_32KPT_MDC_R8 = FFTPlan([
+                              # abc|defghijklmno
+  DigitReorder([4,2], [2,1])  # bca|..........no
+  MdcReorder(4, 2048)         # noa|..........bc
+  SDF(8)                      # NOA|.......klm..
+  Twiddle([4, 1024], 8, 1)
+  MdcReorder(8, 128)          # klm|.......NOA..
+  SDF(8)                      # KLM|....hij.....
+  Twiddle([4, 8, 128, 8], [1, 3], [4])
+  MdcReorder(8, 16)           # hij|....KLM.....
+  SDF(8)                      # HIJ|.efg........
+  Twiddle([4, 64, 16, 8], [1, 3], [4])
+  MdcReorder(8, 2)            # efg| HIJ........
+  SDF(8)                      # EFG|d...........
+  Twiddle([4, 512, 2, 8], [1, 3], [4])
+  MdcReorder(2, 4)            # dFG|E...........
+  DigitReorder([4,2], [2,1])  # FGd|..........bc
+  MdcReorder(4, 2048)         # bcd|..........FG
+  SDF(8)                      # BCD|EHIJKLMNOAFG
+])
+
+# a radix-8 structure with only one non-trivial rotator per 4 lanes
+# (if built in the other stage order, it'd still only have 2 rotators
+# per 8 lanes, but they align better for 4 lanes with this form)
+const SDF8_SPLIT = [
+  SDF(4, 2)
+  Twiddle([4], 2, 1)
+  SDF(2)
+  DigitReorder([4, 2], [2, 1])
+]
+
+const PLAN_32KPT_MDC_R8_SPLIT = FFTPlan([
+                              # abc|defghijklmno
+  DigitReorder([4,2], [2,1])  # bca|..........no
+  MdcReorder(4, 2048)         # noa|..........bc
+  SDF8_SPLIT...               # NOA|.......klm..
+  Twiddle([4, 1024], 8, 1)
+  MdcReorder(8, 128)          # klm|.......NOA..
+  SDF8_SPLIT...               # KLM|....hij.....
+  Twiddle([4, 8, 128, 8], [1, 3], [4])
+  MdcReorder(8, 16)           # hij|....KLM.....
+  SDF8_SPLIT...               # HIJ|.efg........
+  Twiddle([4, 64, 16, 8], [1, 3], [4])
+  MdcReorder(8, 2)            # efg| HIJ........
+  SDF8_SPLIT...               # EFG|d...........
+  Twiddle([4, 512, 2, 8], [1, 3], [4])
+  MdcReorder(2, 4)            # dFG|E...........
+  DigitReorder([4,2], [2,1])  # FGd|..........bc
+  MdcReorder(4, 2048)         # bcd|..........FG
+  SDF8_SPLIT...               # BCD|EHIJKLMNOAFG
+])
 
 PLAN_16KPT_MDC_R22(; test::Bool=true) = recompute_twiddles(FFTPlan([
   MDC_4LANE_SWAP; MdcReorder(2, 4096)
@@ -443,23 +618,9 @@ PLAN_16KPT_MDC_R2(; test::Bool=true) = recompute_twiddles(FFTPlan([
 ]); test)
 
 # And we can use MDC with other radixes as well (though it's not easy to mix radixes):
-const PLAN_81PT_MDC_R3 = recompute_twiddles(FFTPlan([
-  SDF(3,1)
-  MdcReorder(3,1)
-  SDF(3,1)
-  MdcReorder(3,3)
-  SDF(3,1)
-  MdcReorder(3,9)
-  SDF(3,1)
-]))
+const PLAN_81PT_MDC_R3 = plan_mdc(3, 4)
 
-const PLAN_125PT_MDC_R5 = recompute_twiddles(FFTPlan([
-  SDF(5,1)
-  MdcReorder(5,5)
-  SDF(5,1)
-  MdcReorder(5,1)
-  SDF(5,1)
-]))
+const PLAN_625PT_MDC_R5 = plan_mdc_natural(5,4)
 
 # It is possible to construct MDC-like transforms with mixed radix, but it's not
 # clear what it would take for them to make sense in hardware. You could possibly use

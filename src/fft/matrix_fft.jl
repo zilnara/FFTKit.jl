@@ -22,8 +22,16 @@ end
 function function_matrix(n::Int, linear_function)
   basis = I(n)
   if applicable(linear_function, basis, dims=1)
-    linear_function(basis, dims=1)
-  elseif applicable(linear_function, basis, 1)
+    try
+      return linear_function(basis, dims=1)
+    catch e
+      if !(e isa MethodError)
+        rethrow(e)
+      end
+    end
+  end
+
+  if applicable(linear_function, basis, 1)
     linear_function(basis, 1)
   else
     col_1 = linear_function(basis[:,1])
